@@ -1,4 +1,4 @@
-name: Build and Push Rancher FinOps Agent
+name: Build and Push Rancher MCP Proxy
 on:
   push:
     branches: [main]
@@ -7,8 +7,8 @@ on:
 
 env:
   IMAGE_REG: ghcr.io
-  NAME: rancher-finops-agent
-  REPO: hierynomus/rancher-finops-agent
+  NAME: rancher-mcp-proxy
+  REPO: hierynomus/rancher-mcp-proxy
 
 permissions:
   packages: write

@@ -2,9 +2,9 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "rancher-finops-agent.fullname" . }}
+  name: {{ include "rancher-mcp-proxy.fullname" . }}
   labels:
-    {{- include "rancher-finops-agent.labels" . | nindent 4 }}
+    {{- include "rancher-mcp-proxy.labels" . | nindent 4 }}
   annotations:
     {{- if and .Values.ingress.tls.enabled .Values.ingress.tls.certManager.enabled }}
     cert-manager.io/cluster-issuer: {{ .Values.ingress.tls.certManager.clusterIssuer | quote }}
@@ -19,13 +19,13 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: {{ include "rancher-finops-agent.fullname" . }}
+                name: {{ include "rancher-mcp-proxy.fullname" . }}
                 port:
                   number: {{ .Values.service.port }}
   {{- if .Values.ingress.tls.enabled }}
   tls:
     - hosts:
         - {{ .Values.ingress.host | quote }}
-      secretName: {{ include "rancher-finops-agent.tlsSecretName" . }}
+      secretName: {{ include "rancher-mcp-proxy.tlsSecretName" . }}
   {{- end }}
 {{- end }}

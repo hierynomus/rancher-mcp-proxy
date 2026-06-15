@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/hierynomus/rancher-finops-agent
+  repository: ghcr.io/hierynomus/rancher-mcp-proxy
   tag: main
   pullPolicy: Always
 

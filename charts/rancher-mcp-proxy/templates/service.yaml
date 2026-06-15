@@ -1,9 +1,9 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "rancher-finops-agent.fullname" . }}
+  name: {{ include "rancher-mcp-proxy.fullname" . }}
   labels:
-    {{- include "rancher-finops-agent.labels" . | nindent 4 }}
+    {{- include "rancher-mcp-proxy.labels" . | nindent 4 }}
 spec:
   type: {{ .Values.service.type }}
   ports:
@@ -12,4 +12,4 @@ spec:
       protocol: TCP
       name: http
   selector:
-    {{- include "rancher-finops-agent.selectorLabels" . | nindent 4 }}
+    {{- include "rancher-mcp-proxy.selectorLabels" . | nindent 4 }}

@@ -1,0 +1,14 @@
+apiVersion: v2
+name: rancher-mcp-proxy
+description: RBAC-enforcing MCP gateway that proxies upstream MCP servers using Rancher identity
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - mcp
+  - rbac
+  - rancher
+  - proxy
+  - gateway
+maintainers:
+  - name: SUSE

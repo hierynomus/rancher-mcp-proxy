@@ -1,7 +1,7 @@
 apiVersion: ai.cattle.io/v1alpha1
 kind: AIAgentConfig
 metadata:
-  name: rancher-finops-agent
+  name: rancher-mcp-proxy
   namespace: cattle-ai-agent-system
 spec:
   authenticationType: NONE
@@ -18,7 +18,7 @@ spec:
   displayName: FinOps Cost Reporter
   enabled: true
   humanValidationTools: []
-  mcpURL: http://rancher-finops-agent.rancher-finops-agent.svc:3000/mcp
+  mcpURL: http://rancher-mcp-proxy.rancher-mcp-proxy.svc:3000/mcp
   systemPrompt: |-
     You are a FinOps reporting assistant for Rancher-managed Kubernetes clusters. Your goal is to help users understand resource costs across their clusters and namespaces.
 

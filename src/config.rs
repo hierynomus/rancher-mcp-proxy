@@ -208,4 +208,159 @@ servers:
         assert_eq!(cfg.servers.len(), 1);
         assert_eq!(cfg.servers[0].required_role_for("any_tool"), Some("mcp-user"));
     }
+
+    // -----------------------------------------------------------------------
+    // Glob edge cases
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn glob_empty_pattern_matches_empty_name() {
+        assert!(glob_match("", ""));
+    }
+
+    #[test]
+    fn glob_empty_pattern_rejects_nonempty_name() {
+        assert!(!glob_match("", "tool"));
+    }
+
+    #[test]
+    fn glob_star_matches_empty_string() {
+        assert!(glob_match("*", ""));
+        assert!(glob_match("prefix_*", "prefix_"));
+    }
+
+    #[test]
+    fn glob_consecutive_stars_act_like_one_star() {
+        assert!(glob_match("**", "anything"));
+        assert!(glob_match("**", ""));
+        assert!(glob_match("get_**", "get_allocation"));
+    }
+
+    #[test]
+    fn glob_middle_wildcard() {
+        assert!(glob_match("get_*_cost", "get_namespace_cost"));
+        assert!(glob_match("get_*_cost", "get_a_cost"));
+        // The literal "_" between "*" and "cost" must appear in the name.
+        assert!(!glob_match("get_*_cost", "get_cost"));
+        assert!(!glob_match("get_*_cost", "set_namespace_cost"));
+    }
+
+    #[test]
+    fn glob_multiple_question_marks() {
+        assert!(glob_match("get_??", "get_ab"));
+        assert!(!glob_match("get_??", "get_a"));
+        assert!(!glob_match("get_??", "get_abc"));
+    }
+
+    #[test]
+    fn glob_question_mark_at_start() {
+        assert!(glob_match("?et_tool", "get_tool"));
+        assert!(glob_match("?et_tool", "set_tool"));
+        assert!(!glob_match("?et_tool", "tool"));
+    }
+
+    #[test]
+    fn glob_is_case_sensitive() {
+        assert!(!glob_match("Get_*", "get_tool"));
+        assert!(glob_match("Get_*", "Get_tool"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Config YAML parsing
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn yaml_multiple_servers_parsed_in_order() {
+        let yaml = r#"
+servers:
+  - name: alpha
+    url: http://alpha/mcp
+    rules:
+      - tools: ["*"]
+        role: alpha-user
+  - name: beta
+    url: http://beta/mcp
+    rules:
+      - tools: ["*"]
+        role: beta-user
+"#;
+        let cfg: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.servers.len(), 2);
+        assert_eq!(cfg.servers[0].name, "alpha");
+        assert_eq!(cfg.servers[1].name, "beta");
+        assert_eq!(cfg.servers[0].required_role_for("any"), Some("alpha-user"));
+        assert_eq!(cfg.servers[1].required_role_for("any"), Some("beta-user"));
+    }
+
+    #[test]
+    fn yaml_instructions_field_parsed() {
+        let yaml = r#"
+servers:
+  - name: cost
+    url: http://cost/mcp
+    instructions: "You are a cost assistant."
+    rules:
+      - tools: ["*"]
+        role: viewer
+"#;
+        let cfg: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            cfg.servers[0].instructions.as_deref(),
+            Some("You are a cost assistant.")
+        );
+    }
+
+    #[test]
+    fn yaml_absent_rules_defaults_to_empty() {
+        let yaml = r#"
+servers:
+  - name: noauth
+    url: http://noauth/mcp
+"#;
+        let cfg: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.servers[0].rules.len(), 0);
+        assert_eq!(cfg.servers[0].required_role_for("any_tool"), None);
+    }
+
+    #[test]
+    fn yaml_absent_instructions_defaults_to_none() {
+        let yaml = "servers:\n  - name: x\n    url: http://x\n";
+        let cfg: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.servers[0].instructions.is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // from_file
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn from_file_not_found_returns_error() {
+        let result = GatewayConfig::from_file("/nonexistent/path/config.yaml");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("failed to read"));
+    }
+
+    #[test]
+    fn from_file_invalid_yaml_returns_error() {
+        let path = "/tmp/rancher-mcp-test-invalid.yaml";
+        std::fs::write(path, "this: [is: invalid yaml{{{").unwrap();
+        let result = GatewayConfig::from_file(path);
+        std::fs::remove_file(path).ok();
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("failed to parse"));
+    }
+
+    #[test]
+    fn from_file_valid_config_round_trips() {
+        let path = "/tmp/rancher-mcp-test-valid.yaml";
+        let content = "servers:\n  - name: test\n    url: http://test\n    rules:\n      - tools: [\"*\"]\n        role: tester\n";
+        std::fs::write(path, content).unwrap();
+        let cfg = GatewayConfig::from_file(path).unwrap();
+        std::fs::remove_file(path).ok();
+        assert_eq!(cfg.servers.len(), 1);
+        assert_eq!(cfg.servers[0].name, "test");
+        assert_eq!(cfg.servers[0].required_role_for("anything"), Some("tester"));
+    }
 }

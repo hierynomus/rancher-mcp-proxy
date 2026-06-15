@@ -280,7 +280,7 @@ tokens used in development.
 **Single-server mode** (simple, no config file):
 
 ```sh
-helm upgrade --install rancher-mcp-proxy ./charts/rancher-finops-agent \
+helm upgrade --install rancher-mcp-proxy ./charts/rancher-mcp-proxy \
   --namespace mcp-system --create-namespace \
   --set upstreamMcpUrl=http://opencost.opencost.svc:9003/mcp \
   --set rancherAuth.requiredRole=mcp-user \
@@ -342,7 +342,7 @@ docker run --rm \
   -e UPSTREAM_MCP_URL=http://opencost.opencost.svc:9003/mcp \
   -e REQUIRED_ROLE=mcp-user \
   -p 3000:3000 \
-  ghcr.io/hierynomus/rancher-finops-agent:main
+  ghcr.io/hierynomus/rancher-mcp-proxy:main
 ```
 
 ---

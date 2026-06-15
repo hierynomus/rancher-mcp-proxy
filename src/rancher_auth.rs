@@ -147,13 +147,7 @@ impl RancherAuthState {
             .or_else(|| principals.data.first())
             .ok_or_else(|| AuthError::InvalidToken("no principals returned".into()))?;
 
-        let display_name = me
-            .display_name
-            .as_deref()
-            .or(me.login_name.as_deref())
-            .unwrap_or("unknown")
-            .to_string();
-
+        let display_name = resolve_display_name(&principals.data);
         let principal_ids: Vec<String> = principals.data.iter().map(|p| p.id.clone()).collect();
 
         info!(
@@ -163,10 +157,7 @@ impl RancherAuthState {
             "Authenticated Rancher principal"
         );
 
-        Ok(UserIdentity {
-            display_name,
-            principal_ids,
-        })
+        Ok(UserIdentity { display_name, principal_ids })
     }
 
     async fn fetch_roles(
@@ -179,23 +170,7 @@ impl RancherAuthState {
         let bindings: RancherCollection<GlobalRoleBinding> =
             self.get_json(&grb_url, token).await?;
 
-        let roles: Vec<String> = bindings
-            .data
-            .iter()
-            .filter(|b| {
-                let user_match = b
-                    .user_id
-                    .as_deref()
-                    .map_or(false, |uid| principal_ids.iter().any(|pid| pid.ends_with(uid)));
-                let group_match = b
-                    .group_principal_id
-                    .as_deref()
-                    .map_or(false, |gid| principal_ids.iter().any(|pid| pid == gid));
-                user_match || group_match
-            })
-            .map(|b| b.global_role_id.clone())
-            .collect();
-
+        let roles = match_roles(&bindings.data, principal_ids);
         info!(?roles, "User's matching global roles");
         Ok(roles)
     }
@@ -204,6 +179,38 @@ impl RancherAuthState {
 struct UserIdentity {
     display_name: String,
     principal_ids: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Pure helpers — extracted for testability
+// ---------------------------------------------------------------------------
+
+fn resolve_display_name(principals: &[RancherPrincipal]) -> String {
+    principals
+        .iter()
+        .find(|p| p.me == Some(true))
+        .or_else(|| principals.first())
+        .and_then(|p| p.display_name.as_deref().or(p.login_name.as_deref()))
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn match_roles(bindings: &[GlobalRoleBinding], principal_ids: &[String]) -> Vec<String> {
+    bindings
+        .iter()
+        .filter(|b| {
+            let user_match = b
+                .user_id
+                .as_deref()
+                .map_or(false, |uid| principal_ids.iter().any(|pid| pid.ends_with(uid)));
+            let group_match = b
+                .group_principal_id
+                .as_deref()
+                .map_or(false, |gid| principal_ids.iter().any(|pid| pid == gid));
+            user_match || group_match
+        })
+        .map(|b| b.global_role_id.clone())
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -251,4 +258,149 @@ pub async fn rancher_auth_middleware(
     });
 
     Ok(next.run(req).await)
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+
+    // -----------------------------------------------------------------------
+    // resolve_display_name
+    // -----------------------------------------------------------------------
+
+    fn principal(id: &str, display: Option<&str>, login: Option<&str>, me: Option<bool>) -> RancherPrincipal {
+        RancherPrincipal {
+            id: id.into(),
+            display_name: display.map(String::from),
+            login_name: login.map(String::from),
+            principal_type: None,
+            me,
+        }
+    }
+
+    #[test]
+    fn display_name_prefers_me_principal() {
+        let principals = vec![
+            principal("local://other", Some("Other User"), None, None),
+            principal("local://alice", Some("Alice"), None, Some(true)),
+        ];
+        assert_eq!(resolve_display_name(&principals), "Alice");
+    }
+
+    #[test]
+    fn display_name_falls_back_to_first_when_no_me() {
+        let principals = vec![
+            principal("local://first", Some("First"), None, None),
+            principal("local://second", Some("Second"), None, None),
+        ];
+        assert_eq!(resolve_display_name(&principals), "First");
+    }
+
+    #[test]
+    fn display_name_uses_login_when_no_display_name() {
+        let principals = vec![principal("local://alice", None, Some("alice@example.com"), Some(true))];
+        assert_eq!(resolve_display_name(&principals), "alice@example.com");
+    }
+
+    #[test]
+    fn display_name_returns_unknown_when_no_names() {
+        let principals = vec![principal("local://alice", None, None, Some(true))];
+        assert_eq!(resolve_display_name(&principals), "unknown");
+    }
+
+    #[test]
+    fn display_name_returns_unknown_for_empty_list() {
+        assert_eq!(resolve_display_name(&[]), "unknown");
+    }
+
+    // -----------------------------------------------------------------------
+    // match_roles
+    // -----------------------------------------------------------------------
+
+    fn binding(role: &str, user_id: Option<&str>, group_id: Option<&str>) -> GlobalRoleBinding {
+        GlobalRoleBinding {
+            global_role_id: role.into(),
+            user_id: user_id.map(String::from),
+            group_principal_id: group_id.map(String::from),
+        }
+    }
+
+    #[test]
+    fn match_roles_user_id_suffix_match() {
+        // Rancher stores principals as "local://u-abc123"; userId is just "u-abc123".
+        let bindings = vec![binding("mcp-user", Some("u-abc123"), None)];
+        let principal_ids = vec!["local://u-abc123".to_string()];
+        assert_eq!(match_roles(&bindings, &principal_ids), vec!["mcp-user"]);
+    }
+
+    #[test]
+    fn match_roles_group_principal_exact_match() {
+        let bindings = vec![binding("cost-viewer", None, Some("ldap_group://devs"))];
+        let principal_ids = vec!["ldap_group://devs".to_string()];
+        assert_eq!(match_roles(&bindings, &principal_ids), vec!["cost-viewer"]);
+    }
+
+    #[test]
+    fn match_roles_no_match_returns_empty() {
+        let bindings = vec![binding("admin", Some("u-other"), None)];
+        let principal_ids = vec!["local://u-alice".to_string()];
+        assert!(match_roles(&bindings, &principal_ids).is_empty());
+    }
+
+    #[test]
+    fn match_roles_multiple_matching_bindings() {
+        let bindings = vec![
+            binding("cost-viewer", Some("u-alice"), None),
+            binding("platform-user", None, Some("ldap_group://platform")),
+            binding("unrelated", Some("u-bob"), None),
+        ];
+        let principal_ids = vec![
+            "local://u-alice".to_string(),
+            "ldap_group://platform".to_string(),
+        ];
+        let mut roles = match_roles(&bindings, &principal_ids);
+        roles.sort();
+        assert_eq!(roles, vec!["cost-viewer", "platform-user"]);
+    }
+
+    #[test]
+    fn match_roles_group_requires_exact_match_not_suffix() {
+        // Group principal IDs must match exactly — no suffix matching.
+        let bindings = vec![binding("admin", None, Some("ldap_group://admins"))];
+        let principal_ids = vec!["prefix_ldap_group://admins".to_string()];
+        assert!(match_roles(&bindings, &principal_ids).is_empty());
+    }
+
+    #[test]
+    fn match_roles_empty_bindings() {
+        let principal_ids = vec!["local://u-alice".to_string()];
+        assert!(match_roles(&[], &principal_ids).is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // AuthError HTTP status codes
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn auth_error_unreachable_returns_502() {
+        let resp = AuthError::RancherUnreachable("timeout".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn auth_error_invalid_token_returns_401() {
+        let resp = AuthError::InvalidToken("expired".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn auth_error_bad_gateway_returns_502() {
+        let resp = AuthError::BadGateway("parse error".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
 }

@@ -1,14 +1,14 @@
 {{/*
 Expand the name of the chart.
 */}}
-{{- define "rancher-finops-agent.name" -}}
+{{- define "rancher-mcp-proxy.name" -}}
 {{- default .Chart.Name .Values.nameOverride | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Create a default fully qualified app name.
 */}}
-{{- define "rancher-finops-agent.fullname" -}}
+{{- define "rancher-mcp-proxy.fullname" -}}
 {{- if .Values.fullnameOverride }}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" }}
 {{- else }}
@@ -24,16 +24,16 @@ Create a default fully qualified app name.
 {{/*
 Create chart label.
 */}}
-{{- define "rancher-finops-agent.chart" -}}
+{{- define "rancher-mcp-proxy.chart" -}}
 {{- printf "%s-%s" .Chart.Name .Chart.Version | replace "+" "_" | trunc 63 | trimSuffix "-" }}
 {{- end }}
 
 {{/*
 Common labels.
 */}}
-{{- define "rancher-finops-agent.labels" -}}
-helm.sh/chart: {{ include "rancher-finops-agent.chart" . }}
-{{ include "rancher-finops-agent.selectorLabels" . }}
+{{- define "rancher-mcp-proxy.labels" -}}
+helm.sh/chart: {{ include "rancher-mcp-proxy.chart" . }}
+{{ include "rancher-mcp-proxy.selectorLabels" . }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
@@ -43,18 +43,18 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{/*
 Selector labels.
 */}}
-{{- define "rancher-finops-agent.selectorLabels" -}}
-app.kubernetes.io/name: {{ include "rancher-finops-agent.name" . }}
+{{- define "rancher-mcp-proxy.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "rancher-mcp-proxy.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
 TLS secret name — falls back to <fullname>-tls when secretName is not set.
 */}}
-{{- define "rancher-finops-agent.tlsSecretName" -}}
+{{- define "rancher-mcp-proxy.tlsSecretName" -}}
 {{- if .Values.ingress.tls.secretName }}
 {{- .Values.ingress.tls.secretName }}
 {{- else }}
-{{- printf "%s-tls" (include "rancher-finops-agent.fullname" .) }}
+{{- printf "%s-tls" (include "rancher-mcp-proxy.fullname" .) }}
 {{- end }}
 {{- end }}

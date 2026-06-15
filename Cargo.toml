@@ -1,10 +1,10 @@
 [package]
-name = "rancher-finops-agent"
+name = "rancher-mcp-proxy"
 version = "0.1.0"
 edition = "2021"
 
 [[bin]]
-name = "rancher-finops-agent"
+name = "rancher-mcp-proxy"
 path = "src/main.rs"
 
 [dependencies]

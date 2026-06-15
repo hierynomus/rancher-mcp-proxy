@@ -87,6 +87,142 @@ impl ServerProxy {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RoleRule;
+    use crate::rancher_auth::AuthContext;
+    use crate::upstream::UpstreamMcpClient;
+
+    fn make_proxy(rules: Vec<RoleRule>, instructions: Option<&str>) -> ServerProxy {
+        let config = ServerConfig {
+            name: "test-server".into(),
+            url: "http://unused".into(),
+            instructions: instructions.map(String::from),
+            rules,
+        };
+        ServerProxy::new(config, UpstreamMcpClient::new("http://unused".into(), false), vec![])
+    }
+
+    fn parts_with_roles(roles: &[&str]) -> http::request::Parts {
+        let (mut parts, _) = http::Request::new(()).into_parts();
+        parts.extensions.insert(AuthContext {
+            display_name: "Alice".into(),
+            roles: roles.iter().map(|s| s.to_string()).collect(),
+        });
+        parts
+    }
+
+    fn parts_no_auth() -> http::request::Parts {
+        let (parts, _) = http::Request::new(()).into_parts();
+        parts
+    }
+
+    // -----------------------------------------------------------------------
+    // authorize
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn authorize_no_auth_context_requires_authentication() {
+        let proxy = make_proxy(
+            vec![RoleRule { tools: vec!["*".into()], role: "admin".into() }],
+            None,
+        );
+        let err = proxy.authorize("any_tool", &parts_no_auth()).unwrap_err();
+        assert!(err.message.contains("Authentication required"));
+    }
+
+    #[test]
+    fn authorize_no_matching_rule_denies_call() {
+        let proxy = make_proxy(
+            vec![RoleRule { tools: vec!["get_*".into()], role: "viewer".into() }],
+            None,
+        );
+        // "delete_budget" does not match "get_*"
+        let err = proxy.authorize("delete_budget", &parts_with_roles(&["viewer", "admin"])).unwrap_err();
+        assert!(err.message.contains("no role rule matches"));
+    }
+
+    #[test]
+    fn authorize_empty_rules_denies_everything() {
+        let proxy = make_proxy(vec![], None);
+        let err = proxy.authorize("any_tool", &parts_with_roles(&["super-admin"])).unwrap_err();
+        assert!(err.message.contains("no role rule matches"));
+    }
+
+    #[test]
+    fn authorize_wrong_role_returns_forbidden() {
+        let proxy = make_proxy(
+            vec![RoleRule { tools: vec!["*".into()], role: "admin".into() }],
+            None,
+        );
+        let err = proxy.authorize("delete_budget", &parts_with_roles(&["viewer"])).unwrap_err();
+        assert!(err.message.contains("Forbidden"));
+        assert!(err.message.contains("admin"));
+        assert!(err.message.contains("Alice"));
+        assert!(err.message.contains("delete_budget"));
+    }
+
+    #[test]
+    fn authorize_correct_role_allows_call() {
+        let proxy = make_proxy(
+            vec![RoleRule { tools: vec!["*".into()], role: "admin".into() }],
+            None,
+        );
+        assert!(proxy.authorize("delete_budget", &parts_with_roles(&["admin"])).is_ok());
+    }
+
+    #[test]
+    fn authorize_one_of_many_roles_matches() {
+        let proxy = make_proxy(
+            vec![RoleRule { tools: vec!["*".into()], role: "cost-admin".into() }],
+            None,
+        );
+        // User has several roles; only one needs to match.
+        assert!(proxy
+            .authorize("any_tool", &parts_with_roles(&["viewer", "cost-viewer", "cost-admin"]))
+            .is_ok());
+    }
+
+    #[test]
+    fn authorize_uses_first_matching_rule() {
+        // "get_*" maps to viewer; catch-all maps to admin.
+        // A user with only "viewer" should be allowed for get_ tools.
+        let proxy = make_proxy(
+            vec![
+                RoleRule { tools: vec!["get_*".into()], role: "viewer".into() },
+                RoleRule { tools: vec!["*".into()], role: "admin".into() },
+            ],
+            None,
+        );
+        assert!(proxy.authorize("get_allocation", &parts_with_roles(&["viewer"])).is_ok());
+        assert!(proxy.authorize("delete_budget", &parts_with_roles(&["viewer"])).is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // get_info
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn get_info_uses_custom_instructions() {
+        let proxy = make_proxy(vec![], Some("You are a cost analysis assistant."));
+        let info = proxy.get_info();
+        assert_eq!(
+            info.instructions.as_deref(),
+            Some("You are a cost analysis assistant.")
+        );
+    }
+
+    #[test]
+    fn get_info_default_instructions_mention_server_name_and_headers() {
+        let proxy = make_proxy(vec![], None);
+        let info = proxy.get_info();
+        let instructions = info.instructions.as_deref().unwrap_or("");
+        assert!(instructions.contains("test-server"), "should contain server name");
+        assert!(instructions.contains("R_token"), "should mention auth header");
+    }
+}
+
 impl ServerHandler for ServerProxy {
     fn get_info(&self) -> ServerInfo {
         let default_instructions = format!(

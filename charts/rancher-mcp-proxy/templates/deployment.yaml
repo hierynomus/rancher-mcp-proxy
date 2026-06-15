@@ -1,14 +1,14 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ include "rancher-finops-agent.fullname" . }}
+  name: {{ include "rancher-mcp-proxy.fullname" . }}
   labels:
-    {{- include "rancher-finops-agent.labels" . | nindent 4 }}
+    {{- include "rancher-mcp-proxy.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
   selector:
     matchLabels:
-      {{- include "rancher-finops-agent.selectorLabels" . | nindent 6 }}
+      {{- include "rancher-mcp-proxy.selectorLabels" . | nindent 6 }}
   template:
     metadata:
       {{- with .Values.podAnnotations }}
@@ -16,7 +16,7 @@ spec:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       labels:
-        {{- include "rancher-finops-agent.selectorLabels" . | nindent 8 }}
+        {{- include "rancher-mcp-proxy.selectorLabels" . | nindent 8 }}
     spec:
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
@@ -67,7 +67,7 @@ spec:
       volumes:
         - name: role-config
           configMap:
-            name: {{ include "rancher-finops-agent.fullname" . }}-roles
+            name: {{ include "rancher-mcp-proxy.fullname" . }}-roles
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
