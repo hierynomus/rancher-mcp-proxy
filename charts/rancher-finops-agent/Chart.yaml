@@ -1,0 +1,12 @@
+apiVersion: v2
+name: rancher-finops-agent
+description: MCP server that reports Kubernetes resource costs from Rancher cluster data
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - mcp
+  - finops
+  - rancher
+maintainers:
+  - name: SUSE

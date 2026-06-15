@@ -1,0 +1,11 @@
+{{- if .Values.gatewayConfig }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rancher-finops-agent.fullname" . }}-roles
+  labels:
+    {{- include "rancher-finops-agent.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    {{- .Values.gatewayConfig | nindent 4 }}
+{{- end }}

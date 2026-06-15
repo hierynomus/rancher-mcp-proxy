@@ -1,0 +1,25 @@
+[package]
+name = "rancher-finops-agent"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "rancher-finops-agent"
+path = "src/main.rs"
+
+[dependencies]
+rmcp = { version = "1.4", features = ["server", "macros", "transport-streamable-http-server"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
+axum = "0.8"
+http = "1"
+tokio-util = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["test-util"] }

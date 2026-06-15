@@ -1,0 +1,113 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/hierynomus/rancher-finops-agent
+  tag: main
+  pullPolicy: Always
+
+# imagePullSecrets:
+#   - name: ghcr-pull-secret
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 3000
+
+ingress:
+  enabled: true
+  className: traefik
+  host: rancher-mcp-proxy.example.com
+
+  # TLS is opt-in. Set tls.enabled: true to add a TLS block to the Ingress.
+  tls:
+    enabled: false
+    secretName: ""
+    certManager:
+      enabled: false
+      clusterIssuer: letsencrypt-prod
+
+# URL of the upstream MCP server this proxy will gate (required).
+upstreamMcpUrl: ""
+
+# Rancher authentication
+rancherAuth:
+  # Rancher GlobalRole name a user must hold to call any tool.
+  # Used only when roleConfig is not set (simple single-role mode).
+  requiredRole: mcp-user
+  # Set to "false" to skip TLS verification when calling the Rancher API
+  # (useful for self-signed certs in dev/lab environments).
+  tlsVerify: "true"
+
+# Gateway config (YAML).  When set, takes precedence over upstreamMcpUrl and
+# rancherAuth.requiredRole, and enables multi-server mode.  Rules within each
+# server are evaluated in order; first match wins.
+#
+# Example — two upstream servers with separate access tiers:
+#
+# gatewayConfig: |
+#   servers:
+#     - name: opencost
+#       url: http://opencost.opencost.svc:9003/mcp
+#       instructions: "You are a Kubernetes cost analysis assistant."
+#       rules:
+#         - tools: ["get_*", "list_*"]
+#           role: cost-viewer
+#         - tools: ["*"]
+#           role: cost-admin
+#     - name: another-mcp
+#       url: http://another.svc:8080/mcp
+#       rules:
+#         - tools: ["*"]
+#           role: mcp-user
+#
+gatewayConfig: ""
+
+resources:
+  limits:
+    cpu: 100m
+    memory: 32Mi
+  requests:
+    cpu: 20m
+    memory: 16Mi
+
+# Extra environment variables passed to the container
+env:
+  - name: RUST_LOG
+    value: info
+
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 3
+  periodSeconds: 5
+  timeoutSeconds: 2
+  failureThreshold: 3
+
+podAnnotations: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
