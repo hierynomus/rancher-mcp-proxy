@@ -352,7 +352,7 @@ docker run --rm \
 | Limitation | Notes |
 |---|---|
 | **Per-role, not per-user** | All users holding the required role for a tool can call it; there is no per-user or per-tenant scoping within a role. |
-| **No SSE streaming** | The proxy expects the upstream to respond with `application/json`. Upstream servers that return `text/event-stream` for long-running tools will produce an error. |
+| **Only progress notifications are relayed** | If an upstream responds with `text/event-stream`, `notifications/progress` events are forwarded to the MCP client live, as they arrive — but only when the client's call included a progress token (`_meta.progressToken`), which the upstream's notifications must echo back. Other notification types sent before the final response are still not forwarded. |
 | **Tools cached at startup** | The upstream tool list is fetched once when the proxy starts. If the upstream adds or removes tools, restart the proxy to pick up the change. |
 | **Rancher global roles only** | Project-scoped or cluster-scoped Rancher roles are not checked — only `GlobalRoleBindings`. |
 

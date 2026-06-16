@@ -5,7 +5,8 @@ use rmcp::{
     ServerHandler,
     model::{
         CallToolRequestParams, CallToolResult, Implementation, ListToolsResult,
-        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+        PaginatedRequestParams, ProtocolVersion, RequestParamsMeta, ServerCapabilities,
+        ServerInfo, Tool,
     },
     service::{RequestContext, RoleServer},
 };
@@ -122,7 +123,7 @@ impl ServerHandler for ServerProxy {
     /// Enforces per-tool Rancher RBAC, then proxies the call to the upstream.
     async fn call_tool(
         &self,
-        request: CallToolRequestParams,
+        mut request: CallToolRequestParams,
         cx: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let parts = cx.extensions.get::<http::request::Parts>().ok_or_else(|| {
@@ -134,7 +135,17 @@ impl ServerHandler for ServerProxy {
 
         self.authorize(request.name.as_ref(), parts)?;
 
-        self.upstream.proxy_call(request).await
+        // rmcp strips `_meta` out of `params` while decoding the JSON-RPC
+        // envelope (it lives on `RequestContext::meta`, not on `request`
+        // itself), so the caller's progress token has to be copied back onto
+        // `request` before we forward it upstream.
+        match cx.meta.get_progress_token() {
+            Some(token) => {
+                request.set_progress_token(token);
+                self.upstream.proxy_call(request, Some(&cx.peer)).await
+            }
+            None => self.upstream.proxy_call(request, None).await,
+        }
     }
 }
 
