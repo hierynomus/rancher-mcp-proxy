@@ -1,10 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 /// A single access rule: glob patterns on tool names → required Rancher role.
 #[derive(Debug, Clone, Deserialize)]
 pub struct RoleRule {
@@ -66,39 +62,52 @@ pub struct GatewayConfig {
     pub servers: Vec<ServerConfig>,
 }
 
-// ---------------------------------------------------------------------------
-// Loading
-// ---------------------------------------------------------------------------
-
 impl GatewayConfig {
-    /// Load from a TOML file at `path`.
-    pub fn from_file(path: &str) -> Result<Self> {
+    /// Load from a YAML file at `path`.
+    pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let path = path.as_ref();
         let content = std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read gateway config from {path}"))?;
-        serde_yaml::from_str(&content)
-            .with_context(|| format!("failed to parse gateway config YAML from {path}"))
+            .with_context(|| format!("failed to read gateway config from {}", path.display()))?;
+        let config: Self = serde_yaml::from_str(&content)
+            .with_context(|| format!("failed to parse gateway config YAML from {}", path.display()))?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for server in &self.servers {
+            if server.name.is_empty()
+                || !server.name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                anyhow::bail!(
+                    "server name {:?} is invalid; use only ASCII letters, digits, `-`, and `_`",
+                    server.name
+                );
+            }
+            if !seen.insert(&server.name) {
+                anyhow::bail!("duplicate server name {:?}", server.name);
+            }
+        }
+        Ok(())
     }
 
     /// Single-server catch-all — used when no config file is present and
     /// `UPSTREAM_MCP_URL` / `REQUIRED_ROLE` env vars are set.
-    pub fn single_server(url: String, role: String) -> Self {
+    pub fn single_server(url: impl Into<String>, role: impl Into<String>) -> Self {
         Self {
             servers: vec![ServerConfig {
                 name: "upstream".to_string(),
-                url,
+                url: url.into(),
                 instructions: None,
                 rules: vec![RoleRule {
                     tools: vec!["*".to_string()],
-                    role,
+                    role: role.into(),
                 }],
             }],
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Glob matching
-// ---------------------------------------------------------------------------
 
 /// Match `name` against `pattern` using `*` (any sequence) and `?` (one char).
 pub fn glob_match(pattern: &str, name: &str) -> bool {
@@ -114,10 +123,6 @@ fn match_bytes(p: &[u8], n: &[u8]) -> bool {
         _ => false,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -204,7 +209,7 @@ servers:
 
     #[test]
     fn single_server_helper() {
-        let cfg = GatewayConfig::single_server("http://x".into(), "mcp-user".into());
+        let cfg = GatewayConfig::single_server("http://x", "mcp-user");
         assert_eq!(cfg.servers.len(), 1);
         assert_eq!(cfg.servers[0].required_role_for("any_tool"), Some("mcp-user"));
     }
@@ -334,6 +339,57 @@ servers:
     // -----------------------------------------------------------------------
 
     #[test]
+    fn validate_rejects_name_with_slash() {
+        let cfg = GatewayConfig {
+            servers: vec![ServerConfig {
+                name: "bad/name".into(),
+                url: "http://x".into(),
+                instructions: None,
+                rules: vec![],
+            }],
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("invalid"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_name_with_space() {
+        let cfg = GatewayConfig {
+            servers: vec![ServerConfig {
+                name: "bad name".into(),
+                url: "http://x".into(),
+                instructions: None,
+                rules: vec![],
+            }],
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_server_names() {
+        let cfg = GatewayConfig {
+            servers: vec![
+                ServerConfig { name: "alpha".into(), url: "http://a".into(), instructions: None, rules: vec![] },
+                ServerConfig { name: "alpha".into(), url: "http://b".into(), instructions: None, rules: vec![] },
+            ],
+        };
+        let err = cfg.validate().unwrap_err().to_string();
+        assert!(err.contains("duplicate"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_valid_names() {
+        let cfg = GatewayConfig {
+            servers: vec![
+                ServerConfig { name: "opencost".into(), url: "http://a".into(), instructions: None, rules: vec![] },
+                ServerConfig { name: "platform-ops".into(), url: "http://b".into(), instructions: None, rules: vec![] },
+                ServerConfig { name: "server_2".into(), url: "http://c".into(), instructions: None, rules: vec![] },
+            ],
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
     fn from_file_not_found_returns_error() {
         let result = GatewayConfig::from_file("/nonexistent/path/config.yaml");
         assert!(result.is_err());
@@ -343,10 +399,9 @@ servers:
 
     #[test]
     fn from_file_invalid_yaml_returns_error() {
-        let path = "/tmp/rancher-mcp-test-invalid.yaml";
-        std::fs::write(path, "this: [is: invalid yaml{{{").unwrap();
-        let result = GatewayConfig::from_file(path);
-        std::fs::remove_file(path).ok();
+        let mut file = tempfile::Builder::new().suffix(".yaml").tempfile().unwrap();
+        std::io::Write::write_all(&mut file, b"this: [is: invalid yaml{{{").unwrap();
+        let result = GatewayConfig::from_file(file.path());
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("failed to parse"));
@@ -354,11 +409,12 @@ servers:
 
     #[test]
     fn from_file_valid_config_round_trips() {
-        let path = "/tmp/rancher-mcp-test-valid.yaml";
-        let content = "servers:\n  - name: test\n    url: http://test\n    rules:\n      - tools: [\"*\"]\n        role: tester\n";
-        std::fs::write(path, content).unwrap();
-        let cfg = GatewayConfig::from_file(path).unwrap();
-        std::fs::remove_file(path).ok();
+        let mut file = tempfile::Builder::new().suffix(".yaml").tempfile().unwrap();
+        std::io::Write::write_all(
+            &mut file,
+            b"servers:\n  - name: test\n    url: http://test\n    rules:\n      - tools: [\"*\"]\n        role: tester\n",
+        ).unwrap();
+        let cfg = GatewayConfig::from_file(file.path()).unwrap();
         assert_eq!(cfg.servers.len(), 1);
         assert_eq!(cfg.servers[0].name, "test");
         assert_eq!(cfg.servers[0].required_role_for("anything"), Some("tester"));

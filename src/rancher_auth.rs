@@ -7,13 +7,10 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use moka::future::Cache;
 use serde::Deserialize;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
-// ---------------------------------------------------------------------------
-// Auth context — inserted into request extensions by middleware,
-// extracted by tool handlers to enforce role checks and query Rancher.
-// ---------------------------------------------------------------------------
 
 /// Holds the authenticated user's identity and their Rancher global roles.
 /// Inserted into request extensions by the auth middleware; read by tool
@@ -24,9 +21,6 @@ pub struct AuthContext {
     pub roles: Vec<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Auth error
-// ---------------------------------------------------------------------------
 
 pub(crate) enum AuthError {
     RancherUnreachable(String),
@@ -56,9 +50,6 @@ impl IntoResponse for AuthError {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Rancher API types
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,24 +74,31 @@ struct GlobalRoleBinding {
     group_principal_id: Option<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Auth state + Rancher client logic
-// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct RancherAuthState {
     http_client: reqwest::Client,
+    // Keyed by (token, rancher_url). Roles are cached for 60 s to reduce
+    // Rancher API load; revocations take effect within the TTL window.
+    auth_cache: Cache<(String, String), AuthContext>,
 }
 
 impl RancherAuthState {
-    pub fn new(tls_verify: bool) -> Self {
+    /// `cache_ttl_secs` controls how long resolved identities are cached.
+    /// Pass 0 to disable caching (every request hits Rancher).
+    pub fn new(tls_verify: bool, timeout_secs: u64, cache_ttl_secs: u64) -> Self {
         let http_client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(timeout_secs))
             .danger_accept_invalid_certs(!tls_verify)
             .build()
             .expect("failed to build reqwest client");
 
-        Self { http_client }
+        let auth_cache = Cache::builder()
+            .time_to_live(Duration::from_secs(cache_ttl_secs))
+            .max_capacity(if cache_ttl_secs == 0 { 0 } else { 1_000 })
+            .build();
+
+        Self { http_client, auth_cache }
     }
 
     async fn get_json<T: serde::de::DeserializeOwned>(
@@ -181,9 +179,6 @@ struct UserIdentity {
     principal_ids: Vec<String>,
 }
 
-// ---------------------------------------------------------------------------
-// Pure helpers — extracted for testability
-// ---------------------------------------------------------------------------
 
 fn resolve_display_name(principals: &[RancherPrincipal]) -> String {
     principals
@@ -199,23 +194,23 @@ fn match_roles(bindings: &[GlobalRoleBinding], principal_ids: &[String]) -> Vec<
     bindings
         .iter()
         .filter(|b| {
-            let user_match = b
-                .user_id
-                .as_deref()
-                .map_or(false, |uid| principal_ids.iter().any(|pid| pid.ends_with(uid)));
+            let user_match = b.user_id.as_deref().is_some_and(|uid| {
+                principal_ids.iter().any(|pid| {
+                    // Principal IDs are "<scheme>://<id>" (e.g. "local://u-abc123").
+                    // Rancher stores userId as just the bare "<id>" part.
+                    pid.split_once("://").map_or(pid.as_str(), |(_, id)| id) == uid
+                })
+            });
             let group_match = b
                 .group_principal_id
                 .as_deref()
-                .map_or(false, |gid| principal_ids.iter().any(|pid| pid == gid));
+                .is_some_and(|gid| principal_ids.iter().any(|pid| pid == gid));
             user_match || group_match
         })
         .map(|b| b.global_role_id.clone())
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Axum middleware
-// ---------------------------------------------------------------------------
 
 pub async fn rancher_auth_middleware(
     State(state): State<RancherAuthState>,
@@ -241,28 +236,32 @@ pub async fn rancher_auth_middleware(
         }
     };
 
-    let identity = state.identify(&token, &url).await?;
-    let roles = state
-        .fetch_roles(&token, &url, &identity.principal_ids)
-        .await?;
+    let cache_key = (token.clone(), url.clone());
+    let auth_ctx = if let Some(cached) = state.auth_cache.get(&cache_key).await {
+        debug!(display_name = %cached.display_name, "Auth context from cache");
+        cached
+    } else {
+        let identity = state.identify(&token, &url).await?;
+        let roles = state
+            .fetch_roles(&token, &url, &identity.principal_ids)
+            .await?;
 
-    info!(
-        display_name = %identity.display_name,
-        ?roles,
-        "Auth context attached to request"
-    );
+        info!(
+            display_name = %identity.display_name,
+            ?roles,
+            "Auth context attached to request"
+        );
 
-    req.extensions_mut().insert(AuthContext {
-        display_name: identity.display_name,
-        roles,
-    });
+        let ctx = AuthContext { display_name: identity.display_name, roles };
+        state.auth_cache.insert(cache_key, ctx.clone()).await;
+        ctx
+    };
+
+    req.extensions_mut().insert(auth_ctx);
 
     Ok(next.run(req).await)
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -349,6 +348,15 @@ mod tests {
     fn match_roles_no_match_returns_empty() {
         let bindings = vec![binding("admin", Some("u-other"), None)];
         let principal_ids = vec!["local://u-alice".to_string()];
+        assert!(match_roles(&bindings, &principal_ids).is_empty());
+    }
+
+    #[test]
+    fn match_roles_user_id_no_false_positive_on_suffix() {
+        // "u-abc" must NOT match a principal whose ID merely ends with "u-abc"
+        // in a different segment, e.g. "local://other-u-abc".
+        let bindings = vec![binding("admin", Some("u-abc"), None)];
+        let principal_ids = vec!["local://other-u-abc".to_string()];
         assert!(match_roles(&bindings, &principal_ids).is_empty());
     }
 

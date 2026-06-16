@@ -1,13 +1,14 @@
 use anyhow::{Context, Result};
 use axum::{Router, middleware, routing::get};
-use tracing_subscriber::prelude::*;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService,
     session::local::LocalSessionManager,
 };
 use std::sync::Arc;
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod config;
 mod gateway;
@@ -36,6 +37,18 @@ async fn main() -> Result<()> {
     let tls_verify = std::env::var("RANCHER_TLS_VERIFY")
         .map(|v| v != "false" && v != "0")
         .unwrap_or(true);
+    let rancher_timeout_secs = std::env::var("RANCHER_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(5);
+    let upstream_timeout_secs = std::env::var("UPSTREAM_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(30);
+    let auth_cache_ttl_secs = std::env::var("AUTH_CACHE_TTL_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(60);
 
     info!(
         "Rancher TLS verification: {}",
@@ -60,10 +73,10 @@ async fn main() -> Result<()> {
     info!(server_count = gateway_config.servers.len(), "Discovering tools from upstream servers...");
 
     // Discover tools from every configured server in parallel.
-    let mut handles = Vec::new();
+    let mut join_set = JoinSet::new();
     for server in gateway_config.servers {
-        let client = UpstreamMcpClient::new(server.url.clone(), tls_verify);
-        handles.push(tokio::spawn(async move {
+        let client = UpstreamMcpClient::new(server.url.clone(), tls_verify, upstream_timeout_secs);
+        join_set.spawn(async move {
             let tools = client
                 .discover_tools()
                 .await
@@ -72,48 +85,41 @@ async fn main() -> Result<()> {
                 })?;
             info!(server = %server.name, tool_count = tools.len(), "Tools discovered");
             Ok::<_, anyhow::Error>((server, client, tools))
-        }));
+        });
     }
 
     let mut server_tools = Vec::new();
-    for handle in handles {
-        server_tools.push(handle.await??);
+    while let Some(res) = join_set.join_next().await {
+        server_tools.push(res??);
     }
 
-    // Build the axum app: one StreamableHttpService per server, each mounted
-    // at /<name>/mcp.  The HTTP layer provides isolation — no tool name
-    // collisions are possible, and each endpoint carries its own personality
-    // via ServerInfo.instructions.
     let ct = CancellationToken::new();
-    let auth_state = RancherAuthState::new(tls_verify);
-
-    let mut app = Router::new().route("/health", get(health));
-
+    let auth_state = RancherAuthState::new(tls_verify, rancher_timeout_secs, auth_cache_ttl_secs);
     let bind_addr = format!("0.0.0.0:{port}");
+
     info!("Mounting MCP endpoints:");
-
-    for (server, client, tools) in server_tools {
-        let mount_path = format!("/{}/mcp", server.name);
-        let proxy = Arc::new(ServerProxy::new(server, client, tools));
-
-        let svc = StreamableHttpService::new(
-            move || Ok((*proxy).clone()),
-            LocalSessionManager::default().into(),
-            StreamableHttpServerConfig::default()
-                .with_cancellation_token(ct.child_token())
-                .disable_allowed_hosts(),
-        );
-
-        let mcp_router = Router::new()
-            .fallback_service(svc)
-            .layer(middleware::from_fn_with_state(
-                auth_state.clone(),
-                rancher_auth_middleware,
-            ));
-
-        info!("  {bind_addr}{mount_path}");
-        app = app.nest(&mount_path, mcp_router);
-    }
+    let app = server_tools.into_iter().fold(
+        Router::new().route("/health", get(health)),
+        |app, (server, client, tools)| {
+            let mount_path = format!("/{}/mcp", server.name);
+            let proxy = Arc::new(ServerProxy::new(server, client, tools));
+            let svc = StreamableHttpService::new(
+                move || Ok((*proxy).clone()),
+                LocalSessionManager::default().into(),
+                StreamableHttpServerConfig::default()
+                    .with_cancellation_token(ct.child_token())
+                    .disable_allowed_hosts(),
+            );
+            let mcp_router = Router::new()
+                .fallback_service(svc)
+                .layer(middleware::from_fn_with_state(
+                    auth_state.clone(),
+                    rancher_auth_middleware,
+                ));
+            info!("  {bind_addr}{mount_path}");
+            app.nest(&mount_path, mcp_router)
+        },
+    );
 
     let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
     info!("rancher-mcp-gateway listening on {bind_addr}");

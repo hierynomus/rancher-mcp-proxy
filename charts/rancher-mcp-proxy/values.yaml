@@ -12,8 +12,10 @@ nameOverride: ""
 fullnameOverride: ""
 
 service:
+  # ClusterIP (default), NodePort, or LoadBalancer
   type: ClusterIP
   port: 3000
+  # nodePort: 30000   # only used when type=NodePort; omit to let Kubernetes assign one
 
 ingress:
   enabled: true

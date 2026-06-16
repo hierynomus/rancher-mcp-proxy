@@ -3,7 +3,10 @@ use std::sync::Arc;
 use rmcp::{
     ErrorData as McpError,
     ServerHandler,
-    model::*,
+    model::{
+        CallToolRequestParams, CallToolResult, Implementation, ListToolsResult,
+        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo, Tool,
+    },
     service::{RequestContext, RoleServer},
 };
 use tracing::{info, warn};
@@ -25,7 +28,7 @@ use crate::{
 #[derive(Clone)]
 pub struct ServerProxy {
     config: ServerConfig,
-    cached_tools: Arc<Vec<Tool>>,
+    cached_tools: Arc<[Tool]>,
     upstream: UpstreamMcpClient,
 }
 
@@ -33,7 +36,7 @@ impl ServerProxy {
     pub fn new(config: ServerConfig, upstream: UpstreamMcpClient, tools: Vec<Tool>) -> Self {
         Self {
             config,
-            cached_tools: Arc::new(tools),
+            cached_tools: tools.into(),
             upstream,
         }
     }
@@ -87,6 +90,54 @@ impl ServerProxy {
     }
 }
 
+impl ServerHandler for ServerProxy {
+    fn get_info(&self) -> ServerInfo {
+        let fallback;
+        let instructions = match self.config.instructions.as_deref() {
+            Some(s) => s,
+            None => {
+                fallback = format!(
+                    "MCP gateway endpoint for \"{}\". \
+                     Provide R_token and R_url headers to authenticate.",
+                    self.config.name,
+                );
+                &fallback
+            }
+        };
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::from_build_env())
+            .with_protocol_version(ProtocolVersion::V_2024_11_05)
+            .with_instructions(instructions)
+    }
+
+    /// Returns this server's tool list — no auth required.
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _cx: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        Ok(ListToolsResult::with_all_items(self.cached_tools.to_vec()))
+    }
+
+    /// Enforces per-tool Rancher RBAC, then proxies the call to the upstream.
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        cx: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let parts = cx.extensions.get::<http::request::Parts>().ok_or_else(|| {
+            McpError::invalid_request(
+                "Authentication required. Please provide R_token and R_url headers.",
+                None,
+            )
+        })?;
+
+        self.authorize(request.name.as_ref(), parts)?;
+
+        self.upstream.proxy_call(request).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,7 +152,7 @@ mod tests {
             instructions: instructions.map(String::from),
             rules,
         };
-        ServerProxy::new(config, UpstreamMcpClient::new("http://unused".into(), false), vec![])
+        ServerProxy::new(config, UpstreamMcpClient::new("http://unused", false, 30), vec![])
     }
 
     fn parts_with_roles(roles: &[&str]) -> http::request::Parts {
@@ -117,10 +168,6 @@ mod tests {
         let (parts, _) = http::Request::new(()).into_parts();
         parts
     }
-
-    // -----------------------------------------------------------------------
-    // authorize
-    // -----------------------------------------------------------------------
 
     #[test]
     fn authorize_no_auth_context_requires_authentication() {
@@ -178,7 +225,6 @@ mod tests {
             vec![RoleRule { tools: vec!["*".into()], role: "cost-admin".into() }],
             None,
         );
-        // User has several roles; only one needs to match.
         assert!(proxy
             .authorize("any_tool", &parts_with_roles(&["viewer", "cost-viewer", "cost-admin"]))
             .is_ok());
@@ -199,10 +245,6 @@ mod tests {
         assert!(proxy.authorize("delete_budget", &parts_with_roles(&["viewer"])).is_err());
     }
 
-    // -----------------------------------------------------------------------
-    // get_info
-    // -----------------------------------------------------------------------
-
     #[test]
     fn get_info_uses_custom_instructions() {
         let proxy = make_proxy(vec![], Some("You are a cost analysis assistant."));
@@ -220,48 +262,5 @@ mod tests {
         let instructions = info.instructions.as_deref().unwrap_or("");
         assert!(instructions.contains("test-server"), "should contain server name");
         assert!(instructions.contains("R_token"), "should mention auth header");
-    }
-}
-
-impl ServerHandler for ServerProxy {
-    fn get_info(&self) -> ServerInfo {
-        let default_instructions = format!(
-            "MCP gateway endpoint for \"{}\". \
-             Provide R_token and R_url headers to authenticate.",
-            self.config.name,
-        );
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_server_info(Implementation::from_build_env())
-            .with_protocol_version(ProtocolVersion::V_2024_11_05)
-            .with_instructions(
-                self.config.instructions.as_deref().unwrap_or(&default_instructions),
-            )
-    }
-
-    /// Returns this server's tool list — no auth required.
-    async fn list_tools(
-        &self,
-        _request: Option<PaginatedRequestParams>,
-        _cx: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, McpError> {
-        Ok(ListToolsResult::with_all_items((*self.cached_tools).clone()))
-    }
-
-    /// Enforces per-tool Rancher RBAC, then proxies the call to the upstream.
-    async fn call_tool(
-        &self,
-        request: CallToolRequestParams,
-        cx: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
-        let parts = cx.extensions.get::<http::request::Parts>().ok_or_else(|| {
-            McpError::invalid_request(
-                "Authentication required. Please provide R_token and R_url headers.",
-                None,
-            )
-        })?;
-
-        self.authorize(request.name.as_ref(), parts)?;
-
-        self.upstream.proxy_call(request).await
     }
 }

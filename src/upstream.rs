@@ -10,9 +10,6 @@ use anyhow::{Context, Result, bail};
 use rmcp::{ErrorData as McpError, model::{CallToolRequestParams, CallToolResult, ListToolsResult, Tool}};
 use serde::{Deserialize, Serialize};
 
-// ---------------------------------------------------------------------------
-// Minimal JSON-RPC envelope types — only what we need to forward MCP calls.
-// ---------------------------------------------------------------------------
 
 #[derive(Serialize)]
 struct RpcRequest<P: Serialize> {
@@ -30,13 +27,10 @@ struct RpcResponse<R> {
 
 #[derive(Deserialize)]
 struct RpcError {
-    code: i64,
+    code: i32,
     message: String,
 }
 
-// ---------------------------------------------------------------------------
-// Client
-// ---------------------------------------------------------------------------
 
 #[derive(Clone)]
 pub struct UpstreamMcpClient {
@@ -46,16 +40,18 @@ pub struct UpstreamMcpClient {
 }
 
 impl UpstreamMcpClient {
-    pub fn new(url: String, tls_verify: bool) -> Self {
+    pub fn new(url: impl Into<String>, tls_verify: bool, timeout_secs: u64) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(Duration::from_secs(timeout_secs))
             .danger_accept_invalid_certs(!tls_verify)
             .build()
             .expect("failed to build upstream http client");
-        Self { http, url, counter: Arc::new(AtomicU64::new(1)) }
+        Self { http, url: url.into(), counter: Arc::new(AtomicU64::new(1)) }
     }
 
     fn next_id(&self) -> u64 {
+        // Relaxed is correct: we only need uniqueness, not synchronisation with
+        // any other shared state.
         self.counter.fetch_add(1, Ordering::Relaxed)
     }
 
@@ -118,9 +114,6 @@ impl UpstreamMcpClient {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -149,7 +142,7 @@ mod tests {
     }
 
     fn client(url: &str) -> UpstreamMcpClient {
-        UpstreamMcpClient::new(url.to_string(), false)
+        UpstreamMcpClient::new(url, false, 30)
     }
 
     // -----------------------------------------------------------------------
