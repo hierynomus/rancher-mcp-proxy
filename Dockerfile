@@ -3,10 +3,10 @@
 FROM registry.suse.com/bci/bci-minimal:15.7
 
 ARG TARGETARCH
-ARG BINARY=rancher-finops-agent
+ARG BINARY=rancher-mcp-proxy
 
-COPY --from=binaries linux/${TARGETARCH}/rancher-finops-agent /usr/local/bin/rancher-finops-agent
+COPY --from=binaries linux/${TARGETARCH}/rancher-mcp-proxy /usr/local/bin/rancher-mcp-proxy
 
 USER 1001
 
-ENTRYPOINT ["/usr/local/bin/rancher-finops-agent"]
+ENTRYPOINT ["/usr/local/bin/rancher-mcp-proxy"]
