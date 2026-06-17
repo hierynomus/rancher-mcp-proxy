@@ -19,13 +19,16 @@ serde_yaml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 anyhow = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 moka = { version = "0.12", features = ["future"] }
 futures-util = "0.3"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["test-util"] }
 tempfile = "3"
-# "client" is only needed by upstream.rs's end-to-end relay test, which runs
-# a real rmcp client against an in-process duplex transport.
-rmcp = { version = "1.4", features = ["client"] }
+# "client" is needed by upstream.rs's end-to-end relay/cancellation tests,
+# which run a real rmcp client against an in-process duplex transport.
+# "transport-streamable-http-client-reqwest" is needed by the HTTP-level
+# end-to-end test, which runs a real rmcp client over a real TCP connection
+# against the production StreamableHttpService + LocalSessionManager stack.
+rmcp = { version = "1.4", features = ["client", "transport-streamable-http-client-reqwest"] }

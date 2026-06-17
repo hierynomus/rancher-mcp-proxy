@@ -11,7 +11,7 @@ pub struct RoleRule {
 }
 
 /// Configuration for one upstream MCP server.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct ServerConfig {
     /// Used as the URL path segment: `/<name>/mcp`.
     /// Use URL-safe characters (letters, digits, `-`, `_`).
@@ -26,6 +26,11 @@ pub struct ServerConfig {
     /// If no rule matches a tool call, the call is denied.
     #[serde(default)]
     pub rules: Vec<RoleRule>,
+    /// Maximum idle seconds (no bytes received) before a call to this
+    /// upstream is aborted. Overrides the gateway-level `upstream_timeout_secs`
+    /// and the `UPSTREAM_TIMEOUT_SECS` env var.
+    #[serde(default)]
+    pub upstream_timeout_secs: Option<u64>,
 }
 
 impl ServerConfig {
@@ -43,9 +48,13 @@ impl ServerConfig {
 ///
 /// Example `config.yaml`:
 /// ```yaml
+/// upstream_timeout_secs: 60   # default idle timeout for all servers
+/// rancher_timeout_secs: 10    # how long to wait for Rancher auth calls
+/// auth_cache_ttl_secs: 120    # how long to cache Rancher auth results
 /// servers:
 ///   - name: opencost
 ///     url: http://opencost.opencost.svc:9003/mcp
+///     upstream_timeout_secs: 300  # per-server override for long-running queries
 ///     rules:
 ///       - tools: ["get_*", "list_*"]
 ///         role: cost-viewer
@@ -57,9 +66,23 @@ impl ServerConfig {
 ///       - tools: ["*"]
 ///         role: mcp-user
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct GatewayConfig {
     pub servers: Vec<ServerConfig>,
+    /// Gateway-wide idle timeout for upstream calls in seconds. Each server
+    /// may override this with its own `upstream_timeout_secs`. Falls back to
+    /// the `UPSTREAM_TIMEOUT_SECS` env var, then to 30 s.
+    #[serde(default)]
+    pub upstream_timeout_secs: Option<u64>,
+    /// Timeout for Rancher auth HTTP calls in seconds. Falls back to the
+    /// `RANCHER_TIMEOUT_SECS` env var, then to 5 s.
+    #[serde(default)]
+    pub rancher_timeout_secs: Option<u64>,
+    /// How long to cache successful Rancher auth results in seconds. Falls
+    /// back to the `AUTH_CACHE_TTL_SECS` env var, then to 60 s. Set to 0 to
+    /// disable caching (every request hits Rancher).
+    #[serde(default)]
+    pub auth_cache_ttl_secs: Option<u64>,
 }
 
 impl GatewayConfig {
@@ -104,7 +127,11 @@ impl GatewayConfig {
                     tools: vec!["*".to_string()],
                     role: role.into(),
                 }],
+                upstream_timeout_secs: None,
             }],
+            upstream_timeout_secs: None,
+            rancher_timeout_secs: None,
+            auth_cache_ttl_secs: None,
         }
     }
 }
@@ -166,11 +193,11 @@ mod tests {
         let server = ServerConfig {
             name: "test".into(),
             url: "http://x".into(),
-            instructions: None,
             rules: vec![
                 RoleRule { tools: vec!["get_*".into(), "list_*".into()], role: "viewer".into() },
                 RoleRule { tools: vec!["*".into()], role: "admin".into() },
             ],
+            ..Default::default()
         };
         assert_eq!(server.required_role_for("get_allocation"), Some("viewer"));
         assert_eq!(server.required_role_for("list_assets"), Some("viewer"));
@@ -182,8 +209,8 @@ mod tests {
         let server = ServerConfig {
             name: "test".into(),
             url: "http://x".into(),
-            instructions: None,
             rules: vec![RoleRule { tools: vec!["get_*".into()], role: "viewer".into() }],
+            ..Default::default()
         };
         assert_eq!(server.required_role_for("set_budget"), None);
     }
@@ -344,9 +371,9 @@ servers:
             servers: vec![ServerConfig {
                 name: "bad/name".into(),
                 url: "http://x".into(),
-                instructions: None,
-                rules: vec![],
+                ..Default::default()
             }],
+            ..Default::default()
         };
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("invalid"), "got: {err}");
@@ -358,9 +385,9 @@ servers:
             servers: vec![ServerConfig {
                 name: "bad name".into(),
                 url: "http://x".into(),
-                instructions: None,
-                rules: vec![],
+                ..Default::default()
             }],
+            ..Default::default()
         };
         assert!(cfg.validate().is_err());
     }
@@ -369,9 +396,10 @@ servers:
     fn validate_rejects_duplicate_server_names() {
         let cfg = GatewayConfig {
             servers: vec![
-                ServerConfig { name: "alpha".into(), url: "http://a".into(), instructions: None, rules: vec![] },
-                ServerConfig { name: "alpha".into(), url: "http://b".into(), instructions: None, rules: vec![] },
+                ServerConfig { name: "alpha".into(), url: "http://a".into(), ..Default::default() },
+                ServerConfig { name: "alpha".into(), url: "http://b".into(), ..Default::default() },
             ],
+            ..Default::default()
         };
         let err = cfg.validate().unwrap_err().to_string();
         assert!(err.contains("duplicate"), "got: {err}");
@@ -381,10 +409,11 @@ servers:
     fn validate_accepts_valid_names() {
         let cfg = GatewayConfig {
             servers: vec![
-                ServerConfig { name: "opencost".into(), url: "http://a".into(), instructions: None, rules: vec![] },
-                ServerConfig { name: "platform-ops".into(), url: "http://b".into(), instructions: None, rules: vec![] },
-                ServerConfig { name: "server_2".into(), url: "http://c".into(), instructions: None, rules: vec![] },
+                ServerConfig { name: "opencost".into(), url: "http://a".into(), ..Default::default() },
+                ServerConfig { name: "platform-ops".into(), url: "http://b".into(), ..Default::default() },
+                ServerConfig { name: "server_2".into(), url: "http://c".into(), ..Default::default() },
             ],
+            ..Default::default()
         };
         assert!(cfg.validate().is_ok());
     }
@@ -418,5 +447,56 @@ servers:
         assert_eq!(cfg.servers.len(), 1);
         assert_eq!(cfg.servers[0].name, "test");
         assert_eq!(cfg.servers[0].required_role_for("anything"), Some("tester"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Timeout / TTL configuration
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn yaml_gateway_level_timeouts_parsed() {
+        let yaml = r#"
+upstream_timeout_secs: 120
+rancher_timeout_secs: 10
+auth_cache_ttl_secs: 300
+servers:
+  - name: svc
+    url: http://svc/mcp
+    rules:
+      - tools: ["*"]
+        role: user
+"#;
+        let cfg: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.upstream_timeout_secs, Some(120));
+        assert_eq!(cfg.rancher_timeout_secs, Some(10));
+        assert_eq!(cfg.auth_cache_ttl_secs, Some(300));
+        assert!(cfg.servers[0].upstream_timeout_secs.is_none());
+    }
+
+    #[test]
+    fn yaml_per_server_timeout_overrides_gateway_level() {
+        let yaml = r#"
+upstream_timeout_secs: 30
+servers:
+  - name: fast
+    url: http://fast/mcp
+  - name: slow
+    url: http://slow/mcp
+    upstream_timeout_secs: 600
+"#;
+        let cfg: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.upstream_timeout_secs, Some(30));
+        assert!(cfg.servers[0].upstream_timeout_secs.is_none());
+        assert_eq!(cfg.servers[1].upstream_timeout_secs, Some(600));
+    }
+
+    #[test]
+    fn yaml_absent_timeouts_default_to_none() {
+        let yaml = "servers:\n  - name: x\n    url: http://x\n";
+        let cfg: GatewayConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(cfg.upstream_timeout_secs.is_none());
+        assert!(cfg.rancher_timeout_secs.is_none());
+        assert!(cfg.auth_cache_ttl_secs.is_none());
+        assert!(cfg.servers[0].upstream_timeout_secs.is_none());
     }
 }

@@ -15,7 +15,7 @@ use tracing::{info, warn};
 use crate::{
     config::ServerConfig,
     rancher_auth::AuthContext,
-    upstream::UpstreamMcpClient,
+    upstream::{NotificationRelay, UpstreamMcpClient},
 };
 
 /// MCP server proxy for a single upstream.
@@ -134,17 +134,30 @@ impl ServerHandler for ServerProxy {
         })?;
 
         self.authorize(request.name.as_ref(), parts)?;
+        let tool_name = request.name.clone();
 
         // rmcp strips `_meta` out of `params` while decoding the JSON-RPC
         // envelope (it lives on `RequestContext::meta`, not on `request`
         // itself), so the caller's progress token has to be copied back onto
         // `request` before we forward it upstream.
-        match cx.meta.get_progress_token() {
+        let relay: Option<&dyn NotificationRelay> = match cx.meta.get_progress_token() {
             Some(token) => {
                 request.set_progress_token(token);
-                self.upstream.proxy_call(request, Some(&cx.peer)).await
+                Some(&cx.peer as &dyn NotificationRelay)
             }
-            None => self.upstream.proxy_call(request, None).await,
+            None => None,
+        };
+
+        // `cx.ct` is cancelled when the client sends a `notifications/cancelled`
+        // for this request. Racing it against the upstream call drops the
+        // in-flight HTTP request on cancellation instead of running it to
+        // completion against the upstream for a caller that already gave up.
+        tokio::select! {
+            result = self.upstream.proxy_call(request, relay) => result,
+            () = cx.ct.cancelled() => {
+                warn!(tool = %tool_name, server = %self.config.name, "Call cancelled by client");
+                Err(McpError::internal_error("Call cancelled by client", None))
+            }
         }
     }
 }
@@ -162,6 +175,7 @@ mod tests {
             url: "http://unused".into(),
             instructions: instructions.map(String::from),
             rules,
+            upstream_timeout_secs: None,
         };
         ServerProxy::new(config, UpstreamMcpClient::new("http://unused", false, 30), vec![])
     }

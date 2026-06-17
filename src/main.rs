@@ -37,15 +37,15 @@ async fn main() -> Result<()> {
     let tls_verify = std::env::var("RANCHER_TLS_VERIFY")
         .map(|v| v != "false" && v != "0")
         .unwrap_or(true);
-    let rancher_timeout_secs = std::env::var("RANCHER_TIMEOUT_SECS")
+    let env_rancher_timeout_secs = std::env::var("RANCHER_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(5);
-    let upstream_timeout_secs = std::env::var("UPSTREAM_TIMEOUT_SECS")
+    let env_upstream_timeout_secs = std::env::var("UPSTREAM_TIMEOUT_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(30);
-    let auth_cache_ttl_secs = std::env::var("AUTH_CACHE_TTL_SECS")
+    let env_auth_cache_ttl_secs = std::env::var("AUTH_CACHE_TTL_SECS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(60);
@@ -70,11 +70,17 @@ async fn main() -> Result<()> {
         GatewayConfig::single_server(url, role)
     };
 
+    // Resolve timeout/TTL: per-server YAML > gateway YAML > env var > hardcoded default.
+    let gateway_upstream_timeout = gateway_config.upstream_timeout_secs.unwrap_or(env_upstream_timeout_secs);
+    let rancher_timeout_secs = gateway_config.rancher_timeout_secs.unwrap_or(env_rancher_timeout_secs);
+    let auth_cache_ttl_secs = gateway_config.auth_cache_ttl_secs.unwrap_or(env_auth_cache_ttl_secs);
+
     info!(server_count = gateway_config.servers.len(), "Discovering tools from upstream servers...");
 
     // Discover tools from every configured server in parallel.
     let mut join_set = JoinSet::new();
     for server in gateway_config.servers {
+        let upstream_timeout_secs = server.upstream_timeout_secs.unwrap_or(gateway_upstream_timeout);
         let client = UpstreamMcpClient::new(server.url.clone(), tls_verify, upstream_timeout_secs);
         join_set.spawn(async move {
             let tools = client
