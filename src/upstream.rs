@@ -7,6 +7,7 @@ use std::{
     },
     time::Duration,
 };
+use tokio::sync::RwLock;
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::StreamExt;
@@ -93,6 +94,9 @@ pub struct UpstreamMcpClient {
     /// tool that keeps emitting `notifications/progress` stays alive
     /// indefinitely; only a genuinely stalled upstream gets killed.
     idle_timeout: Duration,
+    /// Session ID assigned by the upstream after `initialize`. All requests
+    /// after the handshake must include it via `Mcp-Session-Id`.
+    session_id: Arc<RwLock<Option<String>>>,
 }
 
 impl UpstreamMcpClient {
@@ -103,7 +107,13 @@ impl UpstreamMcpClient {
             .danger_accept_invalid_certs(!tls_verify)
             .build()
             .expect("failed to build upstream http client");
-        Self { http, url: url.into(), counter: Arc::new(AtomicU64::new(1)), idle_timeout }
+        Self {
+            http,
+            url: url.into(),
+            counter: Arc::new(AtomicU64::new(1)),
+            idle_timeout,
+            session_id: Arc::new(RwLock::new(None)),
+        }
     }
 
     fn next_id(&self) -> u64 {
@@ -125,15 +135,24 @@ impl UpstreamMcpClient {
         let id = self.next_id();
         let body = RpcRequest { jsonrpc: "2.0", id, method, params };
 
-        let resp = tokio::time::timeout(self.idle_timeout, self.http.post(&self.url)
+        let mut req = self.http.post(&self.url)
             .header(reqwest::header::ACCEPT, "application/json, text/event-stream")
-            .json(&body)
-            .send())
+            .json(&body);
+        if let Some(sid) = self.session_id.read().await.as_deref() {
+            req = req.header("Mcp-Session-Id", sid);
+        }
+
+        let resp = tokio::time::timeout(self.idle_timeout, req.send())
             .await
             .map_err(|_| {
                 anyhow!("upstream MCP at {} did not respond within {:?}", self.url, self.idle_timeout)
             })?
             .with_context(|| format!("upstream MCP unreachable at {}", self.url))?;
+
+        // Capture session ID from the upstream's response headers.
+        if let Some(sid) = resp.headers().get("Mcp-Session-Id").and_then(|v| v.to_str().ok()) {
+            *self.session_id.write().await = Some(sid.to_string());
+        }
 
         let is_event_stream = resp
             .headers()
@@ -171,8 +190,53 @@ impl UpstreamMcpClient {
         }
     }
 
-    /// Fetch the upstream tool list. Called once at startup; result is cached.
+    /// Send a JSON-RPC notification (no `id`, no response body expected).
+    async fn notify<P: Serialize>(&self, method: &'static str, params: P) -> Result<()> {
+        #[derive(Serialize)]
+        struct Notification<P: Serialize> {
+            jsonrpc: &'static str,
+            method: &'static str,
+            params: P,
+        }
+        let body = Notification { jsonrpc: "2.0", method, params };
+        let mut req = self.http.post(&self.url)
+            .header(reqwest::header::ACCEPT, "application/json, text/event-stream")
+            .json(&body);
+        if let Some(sid) = self.session_id.read().await.as_deref() {
+            req = req.header("Mcp-Session-Id", sid);
+        }
+        let resp = tokio::time::timeout(self.idle_timeout, req.send())
+            .await
+            .map_err(|_| anyhow!("upstream MCP at {} did not respond within {:?}", self.url, self.idle_timeout))?
+            .with_context(|| format!("upstream MCP unreachable at {}", self.url))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = tokio::time::timeout(self.idle_timeout, resp.text())
+                .await.ok().and_then(Result::ok).unwrap_or_default();
+            bail!("upstream notification failed with {status}: {text}");
+        }
+        Ok(())
+    }
+
+    /// Perform the MCP initialization handshake. Must be called before any
+    /// other request. Stores the `Mcp-Session-Id` returned by the upstream.
+    async fn initialize(&self) -> Result<()> {
+        let _: serde_json::Value = self.rpc("initialize", serde_json::json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {
+                "name": env!("CARGO_PKG_NAME"),
+                "version": env!("CARGO_PKG_VERSION"),
+            }
+        }), None).await?;
+        self.notify("notifications/initialized", serde_json::json!({})).await?;
+        Ok(())
+    }
+
+    /// Perform the MCP handshake then fetch the upstream tool list.
+    /// Called once at startup; the session is reused for all subsequent calls.
     pub async fn discover_tools(&self) -> Result<Vec<Tool>> {
+        self.initialize().await?;
         let result: ListToolsResult =
             self.rpc("tools/list", serde_json::json!({}), None).await?;
         Ok(result.tools)
@@ -333,6 +397,7 @@ mod tests {
             url: url.to_string(),
             counter: Arc::new(AtomicU64::new(1)),
             idle_timeout,
+            session_id: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -469,7 +534,8 @@ mod tests {
         let base = start_mock(Router::new().route("/", post(|| async {
             sse_body("data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n")
         }))).await;
-        assert!(client(&base).discover_tools().await.unwrap().is_empty());
+        let result: ListToolsResult = client(&base).rpc("tools/list", json!({}), None).await.unwrap();
+        assert!(result.tools.is_empty());
     }
 
     #[tokio::test]
@@ -480,7 +546,8 @@ mod tests {
                  data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"tools\":[]}}\n\n",
             )
         }))).await;
-        assert!(client(&base).discover_tools().await.unwrap().is_empty());
+        let result: ListToolsResult = client(&base).rpc("tools/list", json!({}), None).await.unwrap();
+        assert!(result.tools.is_empty());
     }
 
     #[tokio::test]
@@ -664,7 +731,8 @@ mod tests {
                 "t\":{\"tools\":[]}}\n\n".to_string(),
             ])
         }))).await;
-        assert!(client(&base).discover_tools().await.unwrap().is_empty());
+        let result: ListToolsResult = client(&base).rpc("tools/list", json!({}), None).await.unwrap();
+        assert!(result.tools.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -741,9 +809,9 @@ mod tests {
         ))).await;
 
         let c = client(&base);
-        c.discover_tools().await.unwrap();
-        c.discover_tools().await.unwrap();
-        c.discover_tools().await.unwrap();
+        let _: ListToolsResult = c.rpc("tools/list", json!({}), None).await.unwrap();
+        let _: ListToolsResult = c.rpc("tools/list", json!({}), None).await.unwrap();
+        let _: ListToolsResult = c.rpc("tools/list", json!({}), None).await.unwrap();
 
         let ids = captured.lock().unwrap();
         assert_eq!(ids.len(), 3);
