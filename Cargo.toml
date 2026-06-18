@@ -20,6 +20,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 anyhow = "1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
+rustls = { version = "0.23", features = ["ring"] }
 moka = { version = "0.12", features = ["future"] }
 futures-util = "0.3"
 
