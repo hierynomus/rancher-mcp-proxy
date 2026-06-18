@@ -125,7 +125,10 @@ impl UpstreamMcpClient {
         let id = self.next_id();
         let body = RpcRequest { jsonrpc: "2.0", id, method, params };
 
-        let resp = tokio::time::timeout(self.idle_timeout, self.http.post(&self.url).json(&body).send())
+        let resp = tokio::time::timeout(self.idle_timeout, self.http.post(&self.url)
+            .header(reqwest::header::ACCEPT, "application/json, text/event-stream")
+            .json(&body)
+            .send())
             .await
             .map_err(|_| {
                 anyhow!("upstream MCP at {} did not respond within {:?}", self.url, self.idle_timeout)
@@ -343,6 +346,31 @@ mod tests {
             Json(json!({"jsonrpc":"2.0","id":1,"result":{"tools":[]}}))
         }))).await;
         assert!(client(&base).discover_tools().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_includes_accept_json_and_event_stream() {
+        use axum::http::HeaderMap;
+        let captured: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let captured_clone = captured.clone();
+        let base = start_mock(Router::new().route("/", post(
+            move |headers: HeaderMap, _body: axum::body::Bytes| {
+                let captured = captured_clone.clone();
+                async move {
+                    let accept = headers
+                        .get(header::ACCEPT)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("")
+                        .to_string();
+                    *captured.lock().unwrap() = Some(accept);
+                    Json(json!({"jsonrpc":"2.0","id":1,"result":{"tools":[]}}))
+                }
+            }
+        ))).await;
+        client(&base).discover_tools().await.unwrap();
+        let accept = captured.lock().unwrap().clone().unwrap_or_default();
+        assert!(accept.contains("application/json"), "Accept was: {accept}");
+        assert!(accept.contains("text/event-stream"), "Accept was: {accept}");
     }
 
     #[tokio::test]
