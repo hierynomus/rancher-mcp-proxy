@@ -43,14 +43,27 @@ impl ServerProxy {
     }
 
     fn authorize(&self, tool_name: &str, parts: &http::request::Parts) -> Result<(), McpError> {
-        let required_role =
-            self.config.required_role_for(tool_name).ok_or_else(|| {
-                warn!(tool = %tool_name, server = %self.config.name, "No matching role rule");
-                McpError::invalid_request(
-                    format!("Tool \"{tool_name}\" is not accessible: no role rule matches it"),
-                    None,
-                )
-            })?;
+        let Some(required_role) = self.config.required_role_for(tool_name) else {
+            // No rule matches this tool — allow any authenticated user through.
+            match parts.extensions.get::<AuthContext>() {
+                None => {
+                    warn!(tool = %tool_name, server = %self.config.name, "Rejected: no auth context");
+                    return Err(McpError::invalid_request(
+                        "Authentication required. Please provide R_token and R_url headers.",
+                        None,
+                    ));
+                }
+                Some(ctx) => {
+                    info!(
+                        user = %ctx.display_name,
+                        tool = %tool_name,
+                        server = %self.config.name,
+                        "Authorized (no role rule — open access)"
+                    );
+                    return Ok(());
+                }
+            }
+        };
 
         match parts.extensions.get::<AuthContext>() {
             None => {
@@ -205,21 +218,29 @@ mod tests {
     }
 
     #[test]
-    fn authorize_no_matching_rule_denies_call() {
+    fn authorize_no_matching_rule_allows_authenticated_user() {
         let proxy = make_proxy(
             vec![RoleRule { tools: vec!["get_*".into()], role: "viewer".into() }],
             None,
         );
-        // "delete_budget" does not match "get_*"
-        let err = proxy.authorize("delete_budget", &parts_with_roles(&["viewer", "admin"])).unwrap_err();
-        assert!(err.message.contains("no role rule matches"));
+        // "delete_budget" does not match "get_*" — no rule means open access
+        assert!(proxy.authorize("delete_budget", &parts_with_roles(&["viewer"])).is_ok());
     }
 
     #[test]
-    fn authorize_empty_rules_denies_everything() {
+    fn authorize_no_matching_rule_still_requires_authentication() {
+        let proxy = make_proxy(
+            vec![RoleRule { tools: vec!["get_*".into()], role: "viewer".into() }],
+            None,
+        );
+        let err = proxy.authorize("delete_budget", &parts_no_auth()).unwrap_err();
+        assert!(err.message.contains("Authentication required"));
+    }
+
+    #[test]
+    fn authorize_empty_rules_allows_any_authenticated_user() {
         let proxy = make_proxy(vec![], None);
-        let err = proxy.authorize("any_tool", &parts_with_roles(&["super-admin"])).unwrap_err();
-        assert!(err.message.contains("no role rule matches"));
+        assert!(proxy.authorize("any_tool", &parts_with_roles(&["super-admin"])).is_ok());
     }
 
     #[test]
