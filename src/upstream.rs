@@ -132,6 +132,20 @@ impl UpstreamMcpClient {
         P: Serialize,
         R: for<'de> Deserialize<'de>,
     {
+        self.rpc_with_extra(method, params, relay, None).await
+    }
+
+    async fn rpc_with_extra<P, R>(
+        &self,
+        method: &'static str,
+        params: P,
+        relay: Option<&dyn NotificationRelay>,
+        extra_headers: Option<&reqwest::header::HeaderMap>,
+    ) -> Result<R>
+    where
+        P: Serialize,
+        R: for<'de> Deserialize<'de>,
+    {
         let id = self.next_id();
         let body = RpcRequest { jsonrpc: "2.0", id, method, params };
 
@@ -140,6 +154,9 @@ impl UpstreamMcpClient {
             .json(&body);
         if let Some(sid) = self.session_id.read().await.as_deref() {
             req = req.header("Mcp-Session-Id", sid);
+        }
+        if let Some(headers) = extra_headers {
+            req = req.headers(headers.clone());
         }
 
         let resp = tokio::time::timeout(self.idle_timeout, req.send())
@@ -242,15 +259,18 @@ impl UpstreamMcpClient {
         Ok(result.tools)
     }
 
-    /// Forward a call_tool request to the upstream MCP verbatim. If `relay`
-    /// is given, any `notifications/progress` or `notifications/message`
-    /// events the upstream sends before its final response are relayed live.
+    /// Forward a call_tool request to the upstream MCP. If `relay` is given,
+    /// any `notifications/progress` or `notifications/message` events the
+    /// upstream sends before its final response are relayed live.
+    /// `extra_headers` are added verbatim to the upstream HTTP request —
+    /// used to forward caller credentials such as `R_token`/`R_url`.
     pub async fn proxy_call(
         &self,
         request: CallToolRequestParams,
         relay: Option<&dyn NotificationRelay>,
+        extra_headers: Option<&reqwest::header::HeaderMap>,
     ) -> Result<CallToolResult, McpError> {
-        self.rpc("tools/call", request, relay)
+        self.rpc_with_extra("tools/call", request, relay, extra_headers)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))
     }
@@ -470,8 +490,40 @@ mod tests {
             }))
         }))).await;
         let req: CallToolRequestParams = serde_json::from_value(json!({"name": "get_cost"})).unwrap();
-        let result = client(&base).proxy_call(req, None).await.unwrap();
+        let result = client(&base).proxy_call(req, None, None).await.unwrap();
         assert_eq!(result.content.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn proxy_call_forwards_extra_headers_to_upstream() {
+        use axum::http::HeaderMap as AxumHeaderMap;
+        let captured: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+        let captured_clone = captured.clone();
+        let base = start_mock(Router::new().route("/", post(
+            move |headers: AxumHeaderMap, _body: axum::body::Bytes| {
+                let captured = captured_clone.clone();
+                async move {
+                    let token = headers.get("R_token").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                    let url   = headers.get("R_url")  .and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                    *captured.lock().unwrap() = Some((token, url));
+                    Json(json!({
+                        "jsonrpc": "2.0", "id": 1,
+                        "result": {"content": [{"type": "text", "text": "ok"}]}
+                    }))
+                }
+            }
+        ))).await;
+
+        let mut extra = reqwest::header::HeaderMap::new();
+        extra.insert("R_token", "test-token-abc".parse().unwrap());
+        extra.insert("R_url",   "https://rancher.example".parse().unwrap());
+
+        let req: CallToolRequestParams = serde_json::from_value(json!({"name": "any_tool"})).unwrap();
+        client(&base).proxy_call(req, None, Some(&extra)).await.unwrap();
+
+        let (token, url) = captured.lock().unwrap().clone().unwrap_or_default();
+        assert_eq!(token, "test-token-abc", "R_token not forwarded; got: {token:?}");
+        assert_eq!(url, "https://rancher.example", "R_url not forwarded; got: {url:?}");
     }
 
     // -----------------------------------------------------------------------
@@ -634,7 +686,7 @@ mod tests {
 
         let relay = RecordingRelay::default();
         let req: CallToolRequestParams = serde_json::from_value(json!({"name": "get_cost"})).unwrap();
-        let result = client(&base).proxy_call(req, Some(&relay)).await.unwrap();
+        let result = client(&base).proxy_call(req, Some(&relay), None).await.unwrap();
         assert_eq!(result.content.len(), 1);
 
         let events = relay.progress_snapshot();
@@ -657,7 +709,7 @@ mod tests {
 
         let relay = RecordingRelay::default();
         let req: CallToolRequestParams = serde_json::from_value(json!({"name": "get_cost"})).unwrap();
-        client(&base).proxy_call(req, Some(&relay)).await.unwrap();
+        client(&base).proxy_call(req, Some(&relay), None).await.unwrap();
 
         let logs = relay.log_snapshot();
         assert_eq!(logs.len(), 2);
@@ -679,7 +731,7 @@ mod tests {
 
         let relay = RecordingRelay::default();
         let req: CallToolRequestParams = serde_json::from_value(json!({"name": "get_cost"})).unwrap();
-        client(&base).proxy_call(req, Some(&relay)).await.unwrap();
+        client(&base).proxy_call(req, Some(&relay), None).await.unwrap();
 
         let progress = relay.progress_snapshot();
         assert_eq!(progress.len(), 2);
@@ -852,7 +904,7 @@ mod tests {
             // call against `cx.ct` drops the in-flight HTTP request when the
             // client cancels, instead of running it to completion.
             tokio::select! {
-                result = self.upstream.proxy_call(request, relay) => result,
+                result = self.upstream.proxy_call(request, relay, None) => result,
                 () = cx.ct.cancelled() => {
                     Err(McpError::internal_error("Call cancelled by client", None))
                 }

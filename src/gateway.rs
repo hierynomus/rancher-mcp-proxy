@@ -161,12 +161,27 @@ impl ServerHandler for ServerProxy {
             None => None,
         };
 
+        // Forward the caller's R_token / R_url headers so upstream MCPs that
+        // accept per-request Rancher credentials (e.g. rancher-helm-mcp) can
+        // use the authenticated user's token instead of a static service account.
+        let rancher_headers = {
+            let mut map = reqwest::header::HeaderMap::new();
+            for name in ["R_token", "R_url"] {
+                if let Some(value) = parts.headers.get(name) {
+                    if let Ok(header_name) = reqwest::header::HeaderName::from_bytes(name.as_bytes()) {
+                        map.insert(header_name, value.clone());
+                    }
+                }
+            }
+            if map.is_empty() { None } else { Some(map) }
+        };
+
         // `cx.ct` is cancelled when the client sends a `notifications/cancelled`
         // for this request. Racing it against the upstream call drops the
         // in-flight HTTP request on cancellation instead of running it to
         // completion against the upstream for a caller that already gave up.
         tokio::select! {
-            result = self.upstream.proxy_call(request, relay) => result,
+            result = self.upstream.proxy_call(request, relay, rancher_headers.as_ref()) => result,
             () = cx.ct.cancelled() => {
                 warn!(tool = %tool_name, server = %self.config.name, "Call cancelled by client");
                 Err(McpError::internal_error("Call cancelled by client", None))
