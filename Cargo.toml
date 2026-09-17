@@ -8,7 +8,7 @@ name = "rancher-mcp-proxy"
 path = "src/main.rs"
 
 [dependencies]
-rmcp = { version = "1.4", features = ["server", "macros", "transport-streamable-http-server"] }
+rmcp = { version = "2.1", features = ["server", "macros", "transport-streamable-http-server"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 axum = "0.8"
 http = "1"
@@ -32,4 +32,4 @@ tempfile = "3"
 # "transport-streamable-http-client-reqwest" is needed by the HTTP-level
 # end-to-end test, which runs a real rmcp client over a real TCP connection
 # against the production StreamableHttpService + LocalSessionManager stack.
-rmcp = { version = "1.4", features = ["client", "transport-streamable-http-client-reqwest"] }
+rmcp = { version = "2.1", features = ["client", "transport-streamable-http-client-reqwest"] }
